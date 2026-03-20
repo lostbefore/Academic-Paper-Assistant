@@ -34,14 +34,17 @@ class LiteratureSearchSkill:
     - CrossRef (for citation info)
     """
 
+    # Class-level rate limiter shared across all instances
+    # Semantic Scholar allows 1 request per second for free tier
+    _last_semantic_scholar_request: Optional[float] = None
+    _ss_rate_limit_delay = 1.1  # 1.1 seconds between requests (slightly more than 1s to be safe)
+    _rate_limit_lock = asyncio.Lock()
+
     def __init__(self):
         """Initialize the literature search skill."""
         self.semantic_scholar_url = "https://api.semanticscholar.org/graph/v1/paper/search"
         self.arxiv_url = "http://export.arxiv.org/api/query"
         self.session: Optional[aiohttp.ClientSession] = None
-        # Rate limiter: Semantic Scholar allows 1 request per second for free tier
-        self._last_semantic_scholar_request: Optional[float] = None
-        self._ss_rate_limit_delay = 1.0  # 1 second between requests
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """Get or create aiohttp session."""
@@ -106,20 +109,23 @@ class LiteratureSearchSkill:
         return unique_papers[:max_results]
 
     async def _apply_semantic_scholar_rate_limit(self):
-        """Ensure at least 1 second between Semantic Scholar API requests."""
-        if self._last_semantic_scholar_request is not None:
-            elapsed = time.time() - self._last_semantic_scholar_request
-            if elapsed < self._ss_rate_limit_delay:
-                sleep_time = self._ss_rate_limit_delay - elapsed
-                await asyncio.sleep(sleep_time)
-        self._last_semantic_scholar_request = time.time()
+        """Ensure at least 1 second between Semantic Scholar API requests (global across all instances)."""
+        async with LiteratureSearchSkill._rate_limit_lock:
+            if LiteratureSearchSkill._last_semantic_scholar_request is not None:
+                elapsed = time.time() - LiteratureSearchSkill._last_semantic_scholar_request
+                if elapsed < LiteratureSearchSkill._ss_rate_limit_delay:
+                    sleep_time = LiteratureSearchSkill._ss_rate_limit_delay - elapsed
+                    print(f"[Rate Limit] Waiting {sleep_time:.2f}s before next Semantic Scholar request...")
+                    await asyncio.sleep(sleep_time)
+            LiteratureSearchSkill._last_semantic_scholar_request = time.time()
 
     async def _search_semantic_scholar(
         self,
         query: str,
-        limit: int
+        limit: int,
+        retries: int = 3
     ) -> List[Paper]:
-        """Search Semantic Scholar API with rate limiting."""
+        """Search Semantic Scholar API with rate limiting and retry logic."""
         # Apply rate limiting before making request
         await self._apply_semantic_scholar_rate_limit()
 
@@ -131,42 +137,56 @@ class LiteratureSearchSkill:
             "fields": "title,authors,year,abstract,venue,citationCount,url"
         }
 
-        try:
-            async with session.get(
-                self.semantic_scholar_url,
-                params=params,
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                if response.status != 200:
-                    print(f"Semantic Scholar API error: {response.status}")
-                    return []
+        for attempt in range(retries):
+            try:
+                async with session.get(
+                    self.semantic_scholar_url,
+                    params=params,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    if response.status == 429:
+                        # Rate limited - wait and retry
+                        wait_time = (attempt + 1) * 2  # Exponential backoff: 2s, 4s, 6s
+                        print(f"[Rate Limit 429] Semantic Scholar rate limited. Waiting {wait_time}s before retry {attempt + 1}/{retries}...")
+                        await asyncio.sleep(wait_time)
+                        # Update last request time to prevent other requests during wait
+                        async with LiteratureSearchSkill._rate_limit_lock:
+                            LiteratureSearchSkill._last_semantic_scholar_request = time.time() + wait_time
+                        continue
 
-                data = await response.json()
-                papers = []
+                    if response.status != 200:
+                        print(f"Semantic Scholar API error: {response.status}")
+                        return []
 
-                for paper_data in data.get("data", []):
-                    authors_list = paper_data.get("authors", [])
-                    authors_str = ", ".join([
-                        a.get("name", "Unknown") for a in authors_list[:3]
-                    ])
-                    if len(authors_list) > 3:
-                        authors_str += " et al."
+                    data = await response.json()
+                    papers = []
 
-                    papers.append(Paper(
-                        title=paper_data.get("title", "Untitled"),
-                        authors=authors_str or "Unknown",
-                        year=paper_data.get("year"),
-                        abstract=paper_data.get("abstract", "No abstract available")[:500],
-                        citation=paper_data.get("venue", "Unknown venue"),
-                        source="semantic_scholar",
-                        url=paper_data.get("url")
-                    ))
+                    for paper_data in data.get("data", []):
+                        authors_list = paper_data.get("authors", [])
+                        authors_str = ", ".join([
+                            a.get("name", "Unknown") for a in authors_list[:3]
+                        ])
+                        if len(authors_list) > 3:
+                            authors_str += " et al."
 
-                return papers
+                        papers.append(Paper(
+                            title=paper_data.get("title", "Untitled"),
+                            authors=authors_str or "Unknown",
+                            year=paper_data.get("year"),
+                            abstract=paper_data.get("abstract", "No abstract available")[:500],
+                            citation=paper_data.get("venue", "Unknown venue"),
+                            source="semantic_scholar",
+                            url=paper_data.get("url")
+                        ))
 
-        except Exception as e:
-            print(f"Semantic Scholar search failed: {e}")
-            return []
+                    return papers
+
+            except Exception as e:
+                print(f"Semantic Scholar search attempt {attempt + 1} failed: {e}")
+                if attempt < retries - 1:
+                    await asyncio.sleep(1)
+
+        return []
 
     async def _search_arxiv(self, query: str, limit: int) -> List[Paper]:
         """Search arXiv API."""
