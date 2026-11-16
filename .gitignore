@@ -44,3 +44,4 @@ Thumbs.db
 # pytest temp dirs
 pytest-of-*/
 .pytest_cache/
+docs/docs-bundle.html
