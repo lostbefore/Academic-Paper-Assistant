@@ -45,3 +45,8 @@ Thumbs.db
 pytest-of-*/
 .pytest_cache/
 docs/docs-bundle.html
+
+# PDF build intermediates
+docs/_pass*.html
+docs/_pass*.pdf
+docs/pages.json
