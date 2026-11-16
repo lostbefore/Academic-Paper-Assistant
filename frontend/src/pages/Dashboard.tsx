@@ -1,215 +1,193 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { Plus, FileText, BookOpen, Award, ArrowRight, Sparkles } from 'lucide-react';
-import { paperApi } from '../services/api';
-import { Paper, ApiStatus } from '../types';
+import {
+  Plus,
+  FileText,
+  BookOpen,
+  Clock,
+  Sparkles,
+  ArrowRight,
+  Search,
+  TrendingUp,
+  AlertCircle,
+} from 'lucide-react';
+import { errorMessage, metaApi, paperApi } from '../services/api';
+import type { ApiStatus, Paper, Stats } from '../types';
 import { useLanguage } from '../i18n';
+import { useAuth } from '../contexts/AuthContext';
 
 export default function Dashboard() {
-  const { t } = useLanguage();
-  const [recentPapers, setRecentPapers] = useState<Paper[]>([]);
+  const { t, language } = useLanguage();
+  const { user } = useAuth();
+  const zh = language === 'chinese';
+  const [papers, setPapers] = useState<Paper[]>([]);
+  const [stats, setStats] = useState<Stats | null>(null);
   const [status, setStatus] = useState<ApiStatus | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   useEffect(() => {
-    loadData();
+    (async () => {
+      try {
+        const [list, statsData, statusData] = await Promise.all([
+          paperApi.list(),
+          paperApi.stats(),
+          metaApi.status(),
+        ]);
+        setPapers(list.slice(0, 5));
+        setStats(statsData);
+        setStatus(statusData);
+      } catch (err) {
+        setError(errorMessage(err));
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
-  const loadData = async () => {
-    try {
-      const [papersData, statusData] = await Promise.all([
-        paperApi.getPapers(),
-        paperApi.getStatus(),
-      ]);
-      setRecentPapers(papersData.slice(0, 5));
-      setStatus(statusData);
-    } catch (error) {
-      console.error('Failed to load data:', error);
-    } finally {
-      setLoading(false);
-    }
+  const statusLabel = (s: string) => {
+    const map: Record<string, [string, string]> = {
+      queued: ['排队中', 'Queued'],
+      running: ['生成中', 'Generating'],
+      completed: ['已完成', 'Completed'],
+      failed: ['失败', 'Failed'],
+      cancelled: ['已取消', 'Cancelled'],
+    };
+    const entry = map[s] || [s, s];
+    return zh ? entry[0] : entry[1];
   };
 
-  const stats = [
-    { label: t('dashboard.totalPapers'), value: recentPapers.length, icon: FileText },
-    { label: t('dashboard.completed'), value: recentPapers.filter(p => p.status === 'completed').length, icon: Award },
-    { label: t('dashboard.inProgress'), value: recentPapers.filter(p => p.status === 'generating' || p.status === 'writing' || p.status === 'reviewing').length, icon: Sparkles },
-  ];
-
-  const features = [
-    {
-      title: t('dashboard.features.generate.title'),
-      description: t('dashboard.features.generate.desc'),
-      icon: Plus,
-      link: '/create',
-      color: 'bg-primary-500',
-    },
-    {
-      title: t('dashboard.features.manage.title'),
-      description: t('dashboard.features.manage.desc'),
-      icon: BookOpen,
-      link: '/papers',
-      color: 'bg-emerald-500',
-    },
-  ];
-
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'completed': return 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200';
-      case 'generating':
-      case 'writing':
-      case 'reviewing': return 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
-      case 'failed': return 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200';
-      default: return 'bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300';
+  const statusColor = (s: string) => {
+    switch (s) {
+      case 'completed': return 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300';
+      case 'failed': return 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300';
+      case 'cancelled': return 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300';
+      default: return 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300';
     }
   };
 
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-primary-600"></div>
+        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-primary-600" />
       </div>
     );
   }
 
+  const cards = [
+    { label: zh ? '论文总数' : 'Total papers', value: stats?.total ?? 0, icon: FileText },
+    { label: zh ? '已完成' : 'Completed', value: stats?.completed ?? 0, icon: BookOpen },
+    { label: zh ? '进行中' : 'In progress', value: stats?.running ?? 0, icon: Clock },
+    { label: zh ? '累计字数' : 'Total words', value: (stats?.words ?? 0).toLocaleString(), icon: TrendingUp },
+  ];
+
   return (
     <div className="space-y-8">
-      {/* Hero Section */}
-      <div className="bg-gradient-to-r from-primary-600 to-primary-700 rounded-2xl p-8 text-white">
-        <h1 className="text-3xl font-bold mb-4">
-          {t('dashboard.welcome')}
+      <section className="rounded-2xl bg-gradient-to-r from-primary-600 to-indigo-700 p-8 text-white">
+        <h1 className="text-2xl sm:text-3xl font-bold">
+          {zh ? `${user?.name || '你好'}，今天想写点什么？` : `Hello ${user?.name || ''}, what are you writing today?`}
         </h1>
-        <p className="text-primary-100 text-lg max-w-2xl mb-6">
-          {t('dashboard.welcomeDesc')}
+        <p className="mt-2 text-primary-100 max-w-2xl">
+          {zh
+            ? '输入选题，系统会先检索真实文献，再据此生成可编辑、可导出的完整论文初稿。'
+            : 'Enter a topic: the system retrieves real literature first, then drafts a complete, editable manuscript.'}
         </p>
-        <div className="flex items-center gap-4">
-          <Link
-            to="/create"
-            className="inline-flex items-center gap-2 bg-white text-primary-600 px-6 py-3 rounded-lg font-semibold hover:bg-primary-50 transition-colors"
-          >
-            <Plus className="w-5 h-5" />
-            {t('dashboard.createNewPaper')}
+        <div className="mt-6 flex flex-wrap gap-3">
+          <Link to="/create" className="inline-flex items-center gap-2 bg-white text-primary-700 px-5 py-2.5 rounded-lg font-semibold hover:bg-primary-50">
+            <Plus className="w-5 h-5" />{t('dashboard.createNewPaper') as string}
           </Link>
-          <Link
-            to="/papers"
-            className="inline-flex items-center gap-2 bg-primary-500 text-white px-6 py-3 rounded-lg font-semibold hover:bg-primary-400 transition-colors"
-          >
-            {t('dashboard.viewPapers')}
-            <ArrowRight className="w-5 h-5" />
+          <Link to="/literature" className="inline-flex items-center gap-2 bg-primary-500/60 border border-white/30 px-5 py-2.5 rounded-lg font-semibold hover:bg-primary-500/80">
+            <Search className="w-5 h-5" />{zh ? '先查文献' : 'Search literature'}
           </Link>
         </div>
-      </div>
+      </section>
 
-      {/* Stats */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-        {stats.map((stat) => {
-          const Icon = stat.icon;
-          return (
-            <div key={stat.label} className="card flex items-center gap-4">
-              <div className="p-3 bg-primary-50 dark:bg-primary-900/30 rounded-lg">
-                <Icon className="w-6 h-6 text-primary-600 dark:text-primary-400" />
-              </div>
-              <div>
-                <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{stat.value}</p>
-                <p className="text-sm text-gray-500 dark:text-gray-400">{stat.label}</p>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Features */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        {features.map((feature) => {
-          const Icon = feature.icon;
-          return (
-            <Link
-              key={feature.title}
-              to={feature.link}
-              className="card hover:shadow-md transition-shadow group"
-            >
-              <div className="flex items-start gap-4">
-                <div className={`p-3 ${feature.color} rounded-lg`}>
-                  <Icon className="w-6 h-6 text-white" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 group-hover:text-primary-600 dark:group-hover:text-primary-400 transition-colors">
-                    {feature.title}
-                  </h3>
-                  <p className="text-gray-500 dark:text-gray-400 mt-1">{feature.description}</p>
-                </div>
-                <ArrowRight className="w-5 h-5 text-gray-400 dark:text-gray-500 group-hover:text-primary-600 dark:group-hover:text-primary-400 group-hover:translate-x-1 transition-all" />
-              </div>
-            </Link>
-          );
-        })}
-      </div>
-
-      {/* Recent Papers */}
-      {recentPapers.length > 0 && (
-        <div className="card">
-          <div className="flex items-center justify-between mb-4">
-            <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100">Recent Papers</h2>
-            <Link to="/papers" className="text-primary-600 hover:text-primary-700 dark:text-primary-400 dark:hover:text-primary-300 font-medium">
-              View All
-            </Link>
-          </div>
-          <div className="space-y-3">
-            {recentPapers.map((paper) => (
-              <Link
-                key={paper.id}
-                to={`/papers/${paper.id}`}
-                className="flex items-center justify-between p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <FileText className="w-5 h-5 text-gray-400 dark:text-gray-500" />
-                  <div>
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100">{paper.title}</h3>
-                    <p className="text-sm text-gray-500 dark:text-gray-400">
-                      {new Date(paper.created_at).toLocaleDateString()}
-                    </p>
-                  </div>
-                </div>
-                <span className={`px-3 py-1 rounded-full text-xs font-medium capitalize ${getStatusColor(paper.status)}`}>
-                  {t(`status.${paper.status}`)}
-                </span>
-              </Link>
-            ))}
-          </div>
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4" />{error}
         </div>
       )}
 
-      {/* API Status */}
+      <section className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {cards.map((card) => {
+          const Icon = card.icon;
+          return (
+            <div key={card.label} className="card flex items-center gap-4">
+              <div className="p-3 bg-primary-50 dark:bg-primary-900/30 rounded-lg">
+                <Icon className="w-5 h-5 text-primary-600 dark:text-primary-400" />
+              </div>
+              <div>
+                <p className="text-2xl font-bold text-gray-900 dark:text-gray-100">{card.value}</p>
+                <p className="text-sm text-gray-500 dark:text-gray-400">{card.label}</p>
+              </div>
+            </div>
+          );
+        })}
+      </section>
+
+      <section className="card">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">
+            {t('dashboard.recentPapers') as string}
+          </h2>
+          <Link to="/papers" className="text-sm font-medium text-primary-600 dark:text-primary-400 hover:underline flex items-center gap-1">
+            {t('dashboard.viewAll') as string}<ArrowRight className="w-4 h-4" />
+          </Link>
+        </div>
+        {papers.length === 0 ? (
+          <div className="text-center py-10 text-gray-500 dark:text-gray-400">
+            <Sparkles className="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" />
+            <p>{t('dashboard.noPapersYet') as string}</p>
+          </div>
+        ) : (
+          <ul className="divide-y divide-gray-100 dark:divide-gray-700">
+            {papers.map((paper) => (
+              <li key={paper.id}>
+                <Link to={`/papers/${paper.id}`} className="flex items-center justify-between py-3 group">
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-gray-100 truncate group-hover:text-primary-600 dark:group-hover:text-primary-400">
+                      {paper.title}
+                    </p>
+                    <p className="text-xs text-gray-500 dark:text-gray-400 mt-0.5">
+                      {new Date(paper.created_at).toLocaleString()} · {paper.word_count} {zh ? '字' : 'words'} · {(paper.request?.citation_style || '').toUpperCase()}
+                    </p>
+                  </div>
+                  <span className={`ml-3 shrink-0 px-2.5 py-1 rounded-full text-xs font-medium ${statusColor(paper.status)}`}>
+                    {statusLabel(paper.status)}
+                  </span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
       {status && (
-        <div className="card bg-gray-50 dark:bg-gray-800">
-          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">{t('dashboard.apiConfig')}</h3>
+        <section className="card bg-gray-50 dark:bg-gray-800/60">
+          <h3 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-3">
+            {zh ? '运行环境' : 'Runtime'}
+          </h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             <div>
-              <span className="text-gray-500 dark:text-gray-400">{t('dashboard.apiKey')}:</span>
-              <span className={`ml-2 font-medium ${status.api_key_configured ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-                {status.api_key_configured ? `✓ ${t('dashboard.configured')}` : `✗ ${t('dashboard.notConfigured')}`}
+              <span className="text-gray-500 dark:text-gray-400">{zh ? '大模型' : 'Model'}:</span>{' '}
+              <span className="font-medium text-gray-700 dark:text-gray-200">{status.model}</span>
+            </div>
+            <div>
+              <span className="text-gray-500 dark:text-gray-400">API:</span>{' '}
+              <span className={`font-medium ${status.llm_configured ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                {status.llm_configured ? (zh ? '已配置' : 'configured') : (zh ? '未配置' : 'missing')}
               </span>
             </div>
             <div>
-              <span className="text-gray-500 dark:text-gray-400">{t('dashboard.model')}:</span>
-              <span className="ml-2 font-medium text-gray-700 dark:text-gray-300">{status.model}</span>
+              <span className="text-gray-500 dark:text-gray-400">{zh ? '文献源' : 'Sources'}:</span>{' '}
+              <span className="font-medium text-gray-700 dark:text-gray-200">{status.literature_sources.length}</span>
             </div>
             <div>
-              <span className="text-gray-500 dark:text-gray-400">{t('dashboard.apiBase')}:</span>
-              <span className="ml-2 font-medium text-gray-700 dark:text-gray-300">{status.api_base}</span>
-            </div>
-            <div>
-              <span className="text-gray-500 dark:text-gray-400">{t('dashboard.citationStyles')}:</span>
-              <span className="ml-2 font-medium text-gray-700 dark:text-gray-300">{status.citation_styles.length}</span>
-            </div>
-            <div>
-              <span className="text-gray-500 dark:text-gray-400">{t('dashboard.languages')}:</span>
-              <span className="ml-2 font-medium text-gray-700 dark:text-gray-300">
-                {status.language_options ? Object.keys(status.language_options).length : 2}
-              </span>
+              <span className="text-gray-500 dark:text-gray-400">{zh ? '版本' : 'Version'}:</span>{' '}
+              <span className="font-medium text-gray-700 dark:text-gray-200">v{status.version}</span>
             </div>
           </div>
-        </div>
+        </section>
       )}
     </div>
   );

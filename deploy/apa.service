@@ -1,0 +1,21 @@
+[Unit]
+Description=Academic Paper Assistant v2
+Documentation=https://github.com/lostbefore/Academic-Paper-Assistant
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=apa
+Group=apa
+WorkingDirectory=/opt/academic-paper-assistant/backend
+EnvironmentFile=/opt/academic-paper-assistant/.env
+ExecStart=/opt/academic-paper-assistant/.venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 80 --proxy-headers --forwarded-allow-ips=*
+Restart=always
+RestartSec=5
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

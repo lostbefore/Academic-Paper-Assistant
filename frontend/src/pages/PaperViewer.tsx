@@ -1,216 +1,173 @@
-import { useEffect, useState, useRef } from 'react';
-import { useParams, Link } from 'react-router-dom';
-import {
-  Loader2,
-  AlertCircle,
-  FileText,
-  CheckCircle,
-  Download,
-  RefreshCw,
-  ChevronLeft,
-  FileCode,
-  X,
-  EyeOff,
-  BookOpen,
-  FileSearch,
-  ImageIcon,
-  ExternalLink,
-  User,
-  BarChart3,
-  Sparkles,
-  Globe,
-  BookOpenCheck,
-} from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link, useParams } from 'react-router-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { paperApi } from '../services/api';
-import { Paper, Reference, PaperImage } from '../types';
+import {
+  ArrowLeft,
+  BookOpen,
+  CheckCircle2,
+  Clock,
+  Download,
+  Edit3,
+  ExternalLink,
+  FileText,
+  Loader2,
+  RefreshCw,
+  RotateCcw,
+  Save,
+  Sparkles,
+  Square,
+  X,
+  XCircle,
+  AlertCircle,
+} from 'lucide-react';
+import { errorMessage, paperApi, saveBlob, streamPaper } from '../services/api';
+import type { Paper, ProgressEvent } from '../types';
+import { SECTION_KEYS, SECTION_LABELS } from '../types';
 import { useLanguage } from '../i18n';
 
-// Download state type
-type DownloadType = 'pdf' | 'docx' | 'md' | null;
+type Tab = 'preview' | 'sources' | 'log';
 
-interface DownloadState {
-  type: DownloadType;
-  status: 'idle' | 'preparing' | 'downloading' | 'success' | 'error';
-  progress: number;
-  message: string;
-}
-
-// Helper to safely get string from translation
-const getString = (value: string | Record<string, string>): string => {
-  return typeof value === 'string' ? value : JSON.stringify(value);
+const STAGE_LABEL: Record<string, [string, string]> = {
+  queued: ['排队中', 'Queued'],
+  researching: ['检索文献', 'Researching'],
+  outlining: ['拟定提纲', 'Outlining'],
+  writing: ['分节写作', 'Writing'],
+  abstract: ['撰写摘要', 'Abstract'],
+  references: ['整理参考文献', 'References'],
+  completed: ['已完成', 'Completed'],
+  failed: ['失败', 'Failed'],
+  cancelled: ['已取消', 'Cancelled'],
+  edit: ['编辑', 'Edit'],
 };
 
 export default function PaperViewer() {
-  const { t } = useLanguage();
   const { id } = useParams<{ id: string }>();
+  const { language } = useLanguage();
+  const zh = language === 'chinese';
+
   const [paper, setPaper] = useState<Paper | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [polling, setPolling] = useState(false);
+  const [tab, setTab] = useState<Tab>('preview');
+  const [events, setEvents] = useState<ProgressEvent[]>([]);
+  const [downloading, setDownloading] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+  const [regen, setRegen] = useState<{ key: string; instructions: string } | null>(null);
+  const streamRef = useRef<(() => void) | null>(null);
 
-  // Download states
-  const [downloadState, setDownloadState] = useState<DownloadState>({
-    type: null,
-    status: 'idle',
-    progress: 0,
-    message: '',
-  });
-  const [showDownloadToast, setShowDownloadToast] = useState(false);
-  const downloadToastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Preview mode state
-  const [formattedPreview, setFormattedPreview] = useState(false);
-
-  // Tab state for switching between preview and sources
-  const [activeTab, setActiveTab] = useState<'preview' | 'sources'>('preview');
-
-  useEffect(() => {
-    if (id) {
-      loadPaper();
-    }
-  }, [id]);
-
-  const loadPaper = async () => {
+  const load = useCallback(async () => {
+    if (!id) return;
     try {
-      const data = await paperApi.getPaper(id!);
+      const data = await paperApi.get(id);
       setPaper(data);
-
-      // Continue polling if paper is still generating
-      if (
-        data.status === 'generating' ||
-        data.status === 'writing'
-      ) {
-        setPolling(true);
-        setTimeout(loadPaper, 3000);
-      } else {
-        setPolling(false);
+      if ((data.status === 'running' || data.status === 'queued') && !streamRef.current) {
+        connectStream();
       }
-    } catch (err: any) {
-      setError(getString(err.response?.data?.detail || t('error')));
+    } catch (err) {
+      setError(errorMessage(err));
     } finally {
       setLoading(false);
     }
-  };
+  }, [id]);
 
-  // Simulate progress for downloads
-  const simulateProgress = (type: DownloadType) => {
-    setDownloadState({
-      type,
-      status: 'preparing',
-      progress: 0,
-      message: getString(t('paperViewer.downloadProgress.preparing') || 'Preparing...'),
-    });
-    setShowDownloadToast(true);
-
-    const steps = [
-      { progress: 15, message: getString(t('paperViewer.downloadProgress.generating') || 'Generating document...'), delay: 300 },
-      { progress: 35, message: getString(t('paperViewer.downloadProgress.formatting') || 'Formatting content...'), delay: 600 },
-      { progress: 55, message: getString(t('paperViewer.downloadProgress.addingImages') || 'Adding images...'), delay: 900 },
-      { progress: 75, message: getString(t('paperViewer.downloadProgress.finalizing') || 'Finalizing...'), delay: 1200 },
-      { progress: 90, message: getString(t('paperViewer.downloadProgress.downloading') || 'Downloading...'), delay: 1500 },
-    ];
-
-    steps.forEach((step) => {
-      setTimeout(() => {
-        setDownloadState((prev) => ({
+  const connectStream = useCallback(() => {
+    if (!id) return;
+    streamRef.current?.();
+    streamRef.current = streamPaper(id, {
+      onEvent: (event) => setEvents((prev) => [...prev.slice(-199), event]),
+      onDone: () => {
+        streamRef.current?.();
+        streamRef.current = null;
+        setTimeout(() => load(), 300);
+      },
+      onError: (message) => {
+        streamRef.current = null;
+        setEvents((prev) => [
           ...prev,
-          progress: step.progress,
-          message: step.message,
-        }));
-      }, step.delay);
+          { id: Date.now(), ts: new Date().toISOString(), stage: 'stream', level: 'warning', message },
+        ]);
+      },
     });
-  };
+  }, [id, load]);
 
-  const completeDownload = (type: DownloadType, success: boolean, errorMsg?: string) => {
-    setDownloadState({
-      type,
-      status: success ? 'success' : 'error',
-      progress: success ? 100 : 0,
-      message: success
-        ? getString(t('paperViewer.downloadProgress.success') || 'Download complete!')
-        : errorMsg || getString(t('paperViewer.downloadProgress.failed') || 'Download failed'),
-    });
+  useEffect(() => {
+    load();
+    return () => {
+      streamRef.current?.();
+      streamRef.current = null;
+    };
+  }, [load]);
 
-    // Auto hide toast after 3 seconds on success
-    if (success) {
-      if (downloadToastTimer.current) {
-        clearTimeout(downloadToastTimer.current);
-      }
-      downloadToastTimer.current = setTimeout(() => {
-        setShowDownloadToast(false);
-        setDownloadState({ type: null, status: 'idle', progress: 0, message: '' });
-      }, 3000);
-    }
-  };
+  // While running, poll for stage/progress updates as a safety net in case the
+  // event stream is blocked by a proxy.
+  useEffect(() => {
+    if (!paper || (paper.status !== 'running' && paper.status !== 'queued')) return;
+    const timer = setInterval(() => {
+      paperApi.get(paper.id).then(setPaper).catch(() => undefined);
+    }, 4000);
+    return () => clearInterval(timer);
+  }, [paper]);
 
-  const handleDownload = async (type: 'pdf' | 'docx' | 'md') => {
-    if (!paper?.id || downloadState.status === 'preparing' || downloadState.status === 'downloading') return;
-
-    simulateProgress(type);
-
+  const download = async (format: 'docx' | 'pdf' | 'md' | 'bib') => {
+    if (!paper) return;
+    setDownloading(format);
     try {
-      let response;
-      let filename: string;
-      let mimeType: string;
-
-      const safeTitle = paper.title.replace(/[^\w\s]/gi, '_').substring(0, 50);
-
-      switch (type) {
-        case 'pdf':
-          setDownloadState((prev) => ({ ...prev, status: 'downloading' }));
-          response = await paperApi.downloadPdf(paper.id);
-          mimeType = 'application/pdf';
-          filename = `${safeTitle}.pdf`;
-          break;
-        case 'docx':
-          setDownloadState((prev) => ({ ...prev, status: 'downloading' }));
-          response = await paperApi.downloadDocx(paper.id);
-          mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
-          filename = `${safeTitle}.docx`;
-          break;
-        case 'md':
-          setDownloadState((prev) => ({ ...prev, status: 'downloading' }));
-          response = await paperApi.downloadMarkdown(paper.id);
-          mimeType = 'text/markdown';
-          filename = `${safeTitle}.md`;
-          break;
-        default:
-          return;
-      }
-
-      // Create and trigger download
-      const blob = new Blob([response.data], { type: mimeType });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-
-      completeDownload(type, true);
-    } catch (err: any) {
-      console.error(`Failed to download ${type.toUpperCase()}:`, err);
-      let errorMsg = getString(t('paperViewer.downloadProgress.failed') || 'Download failed');
-      if (type === 'pdf') {
-        errorMsg = getString(t('paperViewer.downloadProgress.pdfFailed') || 'PDF conversion failed. Please ensure Microsoft Word or LibreOffice is installed.');
-      }
-      completeDownload(type, false, errorMsg);
+      const blob = await paperApi.download(paper.id, format);
+      const base = (paper.title || 'paper').replace(/[\\/:*?"<>|]/g, '_').slice(0, 60);
+      await saveBlob(blob, `${base}.${format}`);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setDownloading(null);
     }
   };
 
-  const downloadDocx = () => handleDownload('docx');
-  const downloadMarkdown = () => handleDownload('md');
-  const downloadPdf = () => handleDownload('pdf');
+  const doAction = async (kind: 'cancel' | 'retry') => {
+    if (!paper) return;
+    setBusy(kind);
+    try {
+      const updated = kind === 'cancel' ? await paperApi.cancel(paper.id) : await paperApi.retry(paper.id);
+      setPaper(updated);
+      if (kind === 'retry') {
+        setEvents([]);
+        setTab('log');
+        connectStream();
+      }
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
 
-  const closeDownloadToast = () => {
-    setShowDownloadToast(false);
-    setDownloadState({ type: null, status: 'idle', progress: 0, message: '' });
-    if (downloadToastTimer.current) {
-      clearTimeout(downloadToastTimer.current);
+  const saveSection = async (key: string) => {
+    if (!paper) return;
+    setBusy(`save-${key}`);
+    try {
+      setPaper(await paperApi.updateSection(paper.id, key, draft));
+      setEditing(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const regenerate = async () => {
+    if (!paper || !regen) return;
+    setBusy(`regen-${regen.key}`);
+    try {
+      const result = await paperApi.regenerateSection(paper.id, regen.key, regen.instructions);
+      setPaper(result.paper);
+      setRegen(null);
+      setEditing(null);
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(null);
     }
   };
 
@@ -222,826 +179,300 @@ export default function PaperViewer() {
     );
   }
 
-  if (error) {
-    return (
-      <div className="max-w-2xl mx-auto">
-        <div className="card text-center py-12">
-          <AlertCircle className="w-16 h-16 text-red-500 mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">{getString(t('error'))}</h2>
-          <p className="text-gray-500 dark:text-gray-400 mb-6">{error}</p>
-          <Link to="/papers" className="btn-primary">
-            {getString(t('paperViewer.backToPapers'))}
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
   if (!paper) {
     return (
-      <div className="max-w-2xl mx-auto">
-        <div className="card text-center py-12">
-          <FileText className="w-16 h-16 text-gray-300 dark:text-gray-600 mx-auto mb-4" />
-          <h2 className="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-2">
-            {getString(t('paperViewer.paperNotFound'))}
-          </h2>
-          <p className="text-gray-500 dark:text-gray-400 mb-6">
-            {getString(t('paperViewer.paperNotFoundDesc'))}
-          </p>
-          <Link to="/papers" className="btn-primary">
-            {getString(t('paperViewer.backToPapers'))}
-          </Link>
-        </div>
+      <div className="card text-center py-16">
+        <FileText className="w-14 h-14 text-gray-300 mx-auto mb-4" />
+        <h2 className="text-xl font-semibold mb-2">{zh ? '未找到论文' : 'Paper not found'}</h2>
+        <p className="text-gray-500 mb-6">{error || (zh ? '这篇论文不存在或已被删除。' : 'It does not exist or was deleted.')}</p>
+        <Link to="/papers" className="btn-primary inline-flex items-center gap-2">
+          <ArrowLeft className="w-4 h-4" />{zh ? '返回列表' : 'Back to papers'}
+        </Link>
       </div>
     );
   }
 
-  const isGenerating =
-    paper.status === 'generating' ||
-    paper.status === 'writing';
+  const running = paper.status === 'running' || paper.status === 'queued';
+  const sections = paper.sections || {};
+  const sectionOrder = ['abstract', ...SECTION_KEYS] as string[];
+  const stage = STAGE_LABEL[paper.stage] || [paper.stage, paper.stage];
+  const stageText = zh ? stage[0] : stage[1];
+
+  const statusBadge = () => {
+    if (paper.status === 'completed') return { cls: 'bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300', icon: CheckCircle2, label: zh ? '已完成' : 'Completed' };
+    if (paper.status === 'failed') return { cls: 'bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300', icon: XCircle, label: zh ? '失败' : 'Failed' };
+    if (paper.status === 'cancelled') return { cls: 'bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300', icon: XCircle, label: zh ? '已取消' : 'Cancelled' };
+    return { cls: 'bg-blue-100 text-blue-800 dark:bg-blue-900/40 dark:text-blue-300', icon: Clock, label: zh ? '生成中' : 'Generating' };
+  };
+  const badge = statusBadge();
+  const BadgeIcon = badge.icon;
 
   return (
     <div className="space-y-6">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Link
-            to="/papers"
-            className="p-2 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-lg transition-colors"
-          >
-            <ChevronLeft className="w-5 h-5 text-gray-500 dark:text-gray-400" />
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <Link to="/papers" className="text-sm text-gray-500 hover:text-primary-600 flex items-center gap-1 mb-2">
+            <ArrowLeft className="w-4 h-4" />{zh ? '返回论文列表' : 'Back to papers'}
           </Link>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100">{paper.title}</h1>
-            <div className="flex items-center gap-3 mt-1">
-              <span
-                className={`px-2 py-0.5 rounded-full text-xs font-medium capitalize ${
-                  paper.status === 'completed'
-                    ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200'
-                    : paper.status === 'failed'
-                    ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200'
-                    : 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200'
-                }`}
-              >
-                {getString(t(`status.${paper.status}`))}
-              </span>
-              {paper.request?.language && (
-                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-700 dark:bg-gray-700 dark:text-gray-300">
-                  {paper.request.language === 'chinese' ? '中文' : 'English'}
-                </span>
-              )}
-              {polling && (
-                <span className="flex items-center gap-1 text-sm text-blue-600 dark:text-blue-400">
-                  <RefreshCw className="w-4 h-4 animate-spin" />
-                  {getString(t('paperViewer.processing'))}
-                </span>
-              )}
-            </div>
+          <h1 className="text-2xl font-bold text-gray-900 dark:text-gray-100 leading-snug">{paper.title}</h1>
+          <div className="flex flex-wrap items-center gap-2 mt-3 text-sm">
+            <span className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium ${badge.cls}`}>
+              <BadgeIcon className="w-3.5 h-3.5" />{badge.label}
+            </span>
+            <span className="px-2.5 py-1 rounded-full text-xs bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300">
+              {paper.request?.language === 'chinese' ? '中文' : 'English'}
+            </span>
+            <span className="px-2.5 py-1 rounded-full text-xs bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-300 uppercase">
+              {paper.request?.citation_style}
+            </span>
+            <span className="text-gray-500 dark:text-gray-400">
+              {paper.word_count || 0} {zh ? '字' : 'words'} · {paper.references?.length || 0} {zh ? '篇参考文献' : 'references'}
+            </span>
+            {paper.meta?.model && <span className="text-gray-400 dark:text-gray-500">· {String(paper.meta.model)}</span>}
           </div>
         </div>
-
-        {paper.status === 'completed' && (
-          <div className="flex items-center gap-2">
-            <DownloadButton
-              type="pdf"
-              onClick={downloadPdf}
-              isLoading={downloadState.type === 'pdf' && downloadState.status !== 'idle' && downloadState.status !== 'success' && downloadState.status !== 'error'}
-              isSuccess={downloadState.type === 'pdf' && downloadState.status === 'success'}
-              label="PDF"
-              title={getString(t('paperViewer.downloadPdf'))}
-            />
-            <DownloadButton
-              type="docx"
-              onClick={downloadDocx}
-              isLoading={downloadState.type === 'docx' && downloadState.status !== 'idle' && downloadState.status !== 'success' && downloadState.status !== 'error'}
-              isSuccess={downloadState.type === 'docx' && downloadState.status === 'success'}
-              label="DOCX"
-              title={getString(t('paperViewer.downloadDocx'))}
-            />
-            <DownloadButton
-              type="md"
-              onClick={downloadMarkdown}
-              isLoading={downloadState.type === 'md' && downloadState.status !== 'idle' && downloadState.status !== 'success' && downloadState.status !== 'error'}
-              isSuccess={downloadState.type === 'md' && downloadState.status === 'success'}
-              label="MD"
-              title={getString(t('paperViewer.downloadMarkdown'))}
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Progress Steps */}
-      {isGenerating && (
-        <div className="card">
-          <div className="flex items-center justify-between">
-            {[getString(t('paperViewer.progressSteps.research')), getString(t('paperViewer.progressSteps.writing')), getString(t('paperViewer.progressSteps.complete'))].map((step, index) => {
-              const isActive =
-                (paper.status === 'generating' && index === 0) ||
-                (paper.status === 'writing' && index === 1) ||
-                (paper.status === 'completed' && index === 2);
-
-              const isDone =
-                (paper.status === 'writing' && index < 1) ||
-                (paper.status === 'completed' && index < 2);
-
-              return (
-                <div key={index} className="flex items-center gap-2">
-                  <div
-                    className={`w-8 h-8 rounded-full flex items-center justify-center ${
-                      isDone
-                        ? 'bg-green-500 text-white'
-                        : isActive
-                        ? 'bg-blue-500 text-white animate-pulse'
-                        : 'bg-gray-200 dark:bg-gray-700 text-gray-400 dark:text-gray-500'
-                    }`}
-                  >
-                    {isDone ? (
-                      <CheckCircle className="w-5 h-5" />
-                    ) : (
-                      <span className="text-sm font-medium">{index + 1}</span>
-                    )}
-                  </div>
-                  <span
-                    className={`text-sm font-medium ${
-                      isActive || isDone ? 'text-gray-900 dark:text-gray-100' : 'text-gray-400 dark:text-gray-500'
-                    }`}
-                  >
-                    {step}
-                  </span>
-                </div>
-              );
-            })}
-          </div>
-          <div className="mt-4 h-2 bg-gray-200 dark:bg-gray-700 rounded-full overflow-hidden">
-            <div
-              className="h-full bg-primary-600 dark:bg-primary-500 transition-all duration-500"
-              style={{
-                width:
-                  paper.status === 'generating'
-                    ? '33%'
-                    : paper.status === 'writing'
-                    ? '66%'
-                    : '100%',
-              }}
-            />
-          </div>
-        </div>
-      )}
-
-      {/* Tab Navigation */}
-      {paper.status === 'completed' && (
-        <div className="card py-2 px-2">
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setActiveTab('preview')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
-                activeTab === 'preview'
-                  ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300'
-                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
-              }`}
-            >
-              <BookOpen className="w-4 h-4" />
-              {paper.request?.language === 'chinese' ? '论文预览' : 'Paper Preview'}
+        <div className="flex flex-wrap items-center gap-2">
+          {running ? (
+            <button onClick={() => doAction('cancel')} disabled={busy === 'cancel'} className="btn-secondary flex items-center gap-2">
+              {busy === 'cancel' ? <Loader2 className="w-4 h-4 animate-spin" /> : <Square className="w-4 h-4" />}
+              {zh ? '取消' : 'Cancel'}
             </button>
-            <button
-              onClick={() => setActiveTab('sources')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all ${
-                activeTab === 'sources'
-                  ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300'
-                  : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-700'
-              }`}
-            >
-              <FileSearch className="w-4 h-4" />
-              {paper.request?.language === 'chinese' ? '引用与来源' : 'References & Sources'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Content */}
-      {paper.status === 'completed' && paper.sections && (
-        <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-          {/* Sidebar - only show in preview tab */}
-          {activeTab === 'preview' && (
-            <div className="lg:col-span-1">
-              <div className="card sticky top-24">
-                {/* Preview Mode Toggle */}
-                <div className="mb-4 pb-4 border-b border-gray-200 dark:border-gray-600">
-                  <button
-                    onClick={() => setFormattedPreview(!formattedPreview)}
-                    className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg bg-primary-50 dark:bg-primary-900/30 hover:bg-primary-100 dark:hover:bg-primary-900/50 text-primary-700 dark:text-primary-300 transition-colors"
-                  >
-                    {formattedPreview ? (
-                      <>
-                        <EyeOff className="w-4 h-4" />
-                        <span>{getString(t('paperViewer.plainPreview') || 'Plain Preview')}</span>
-                      </>
-                    ) : (
-                      <>
-                        <BookOpen className="w-4 h-4" />
-                        <span>{getString(t('paperViewer.formattedPreview') || 'Formatted Preview')}</span>
-                      </>
-                    )}
-                  </button>
-                </div>
-                <h3 className="font-semibold text-gray-900 dark:text-gray-100 mb-4">{getString(t('paperViewer.sections'))}</h3>
-                <nav className="space-y-1">
-                  {[
-                    { key: 'abstract', label: getString(t('paperViewer.abstract')) },
-                    { key: 'introduction', label: getString(t('paperViewer.introduction')) },
-                    { key: 'literature_review', label: getString(t('paperViewer.literatureReview')) },
-                    { key: 'methodology', label: getString(t('paperViewer.methodology')) },
-                    { key: 'results', label: getString(t('paperViewer.results')) },
-                    { key: 'discussion', label: getString(t('paperViewer.discussion')) },
-                    { key: 'conclusion', label: getString(t('paperViewer.conclusion')) },
-                    { key: 'references', label: getString(t('paperViewer.references')) },
-                  ].map((section) => (
-                    <a
-                      key={section.key}
-                      href={`#${section.key}`}
-                      className="block px-3 py-2 text-sm text-gray-600 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg transition-colors"
-                    >
-                      {section.label}
-                    </a>
+          ) : (
+            <>
+              <button onClick={() => doAction('retry')} disabled={busy === 'retry'} className="btn-secondary flex items-center gap-2">
+                <RotateCcw className="w-4 h-4" />{zh ? '重新生成' : 'Regenerate'}
+              </button>
+              {paper.status === 'completed' && (
+                <>
+                  {(['docx', 'pdf', 'md', 'bib'] as const).map((fmt) => (
+                    <button key={fmt} onClick={() => download(fmt)} disabled={downloading === fmt} className="btn-secondary flex items-center gap-2">
+                      {downloading === fmt ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+                      {fmt === 'docx' ? 'Word' : fmt === 'pdf' ? 'PDF' : fmt === 'md' ? 'MD' : 'BibTeX'}
+                    </button>
                   ))}
-                </nav>
-              </div>
-            </div>
-          )}
-
-          {/* Main Content */}
-          <div className={activeTab === 'preview' ? 'lg:col-span-3' : 'lg:col-span-4'}>
-            {activeTab === 'preview' ? (
-              formattedPreview ? (
-                <FormattedPaperPreview paper={paper} />
-              ) : (
-                <div className="card">
-                  <article className="prose prose-lg max-w-none">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {`# ${paper.sections.title}
-
-## Abstract
-
-${paper.sections.abstract}
-
-## Introduction
-
-${paper.sections.introduction}
-
-## Literature Review
-
-${paper.sections.literature_review}
-
-## Methodology
-
-${paper.sections.methodology}
-
-## Results
-
-${paper.sections.results}
-
-## Discussion
-
-${paper.sections.discussion}
-
-## Conclusion
-
-${paper.sections.conclusion}
-
-## References
-
-${paper.sections.references}`}
-                    </ReactMarkdown>
-                  </article>
-                </div>
-              )
-            ) : (
-              <SourcesAndReferencesTab paper={paper} />
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Download Progress Toast */}
-      {showDownloadToast && (
-        <DownloadToast
-          state={downloadState}
-          onClose={closeDownloadToast}
-        />
-      )}
-
-    </div>
-  );
-}
-
-// Download Button Component
-interface DownloadButtonProps {
-  type: 'pdf' | 'docx' | 'md';
-  onClick: () => void;
-  isLoading: boolean;
-  isSuccess: boolean;
-  label: string;
-  title: string;
-}
-
-function DownloadButton({ type, onClick, isLoading, isSuccess, label, title }: DownloadButtonProps) {
-  const getIcon = () => {
-    if (isLoading) return <Loader2 className="w-4 h-4 animate-spin" />;
-    if (isSuccess) return <CheckCircle className="w-4 h-4 text-green-500" />;
-    if (type === 'md') return <FileCode className="w-4 h-4" />;
-    return <FileText className="w-4 h-4" />;
-  };
-
-  const getClassName = () => {
-    const baseClass = "flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-all duration-200";
-    if (isLoading) {
-      return `${baseClass} bg-blue-50 text-blue-600 border border-blue-200 cursor-wait`;
-    }
-    if (isSuccess) {
-      return `${baseClass} bg-green-50 text-green-600 border border-green-200 hover:bg-green-100`;
-    }
-    return `${baseClass} bg-white dark:bg-gray-700 text-gray-700 dark:text-gray-200 border border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-600 hover:border-gray-400 dark:hover:border-gray-500`;
-  };
-
-  return (
-    <button
-      onClick={onClick}
-      disabled={isLoading}
-      className={getClassName()}
-      title={title}
-    >
-      {getIcon()}
-      <span>{label}</span>
-    </button>
-  );
-}
-
-// Download Toast Component
-interface DownloadToastProps {
-  state: DownloadState;
-  onClose: () => void;
-}
-
-function DownloadToast({ state, onClose }: DownloadToastProps) {
-  const getStatusColor = () => {
-    switch (state.status) {
-      case 'success':
-        return 'bg-green-500';
-      case 'error':
-        return 'bg-red-500';
-      case 'preparing':
-      case 'downloading':
-        return 'bg-blue-500';
-      default:
-        return 'bg-gray-500';
-    }
-  };
-
-  const getStatusIcon = () => {
-    switch (state.status) {
-      case 'success':
-        return <CheckCircle className="w-5 h-5 text-green-500" />;
-      case 'error':
-        return <AlertCircle className="w-5 h-5 text-red-500" />;
-      case 'preparing':
-      case 'downloading':
-        return <Loader2 className="w-5 h-5 text-blue-500 animate-spin" />;
-      default:
-        return <Download className="w-5 h-5 text-gray-500 dark:text-gray-400" />;
-    }
-  };
-
-  const getFileTypeLabel = () => {
-    switch (state.type) {
-      case 'pdf': return 'PDF';
-      case 'docx': return 'DOCX';
-      case 'md': return 'Markdown';
-      default: return 'File';
-    }
-  };
-
-  return (
-    <div className="fixed bottom-6 right-6 z-50 animate-in slide-in-from-bottom-4 fade-in duration-300">
-      <div className="bg-white dark:bg-gray-800 rounded-lg shadow-xl border border-gray-200 dark:border-gray-600 overflow-hidden min-w-[320px]">
-        {/* Header */}
-        <div className="flex items-center justify-between px-4 py-3 bg-gray-50 dark:bg-gray-700 border-b border-gray-100 dark:border-gray-600">
-          <div className="flex items-center gap-2">
-            {getStatusIcon()}
-            <span className="font-medium text-gray-700 dark:text-gray-200">
-              {state.status === 'success' ? 'Download Complete' :
-               state.status === 'error' ? 'Download Failed' :
-               `Downloading ${getFileTypeLabel()}`}
-            </span>
-          </div>
-          <button
-            onClick={onClose}
-            className="p-1 hover:bg-gray-200 dark:hover:bg-gray-600 rounded-full transition-colors"
-          >
-            <X className="w-4 h-4 text-gray-400 dark:text-gray-500" />
-          </button>
-        </div>
-
-        {/* Progress Bar */}
-        {(state.status === 'preparing' || state.status === 'downloading') && (
-          <div className="px-4 py-3">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-sm text-gray-600 dark:text-gray-400">{state.message}</span>
-              <span className="text-sm font-medium text-gray-700 dark:text-gray-300">{state.progress}%</span>
-            </div>
-            <div className="h-2 bg-gray-100 dark:bg-gray-600 rounded-full overflow-hidden">
-              <div
-                className={`h-full ${getStatusColor()} transition-all duration-300 ease-out`}
-                style={{ width: `${state.progress}%` }}
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Success/Error Message */}
-        {(state.status === 'success' || state.status === 'error') && (
-          <div className="px-4 py-3">
-            <p className={`text-sm ${state.status === 'success' ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
-              {state.message}
-            </p>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// Formatted Paper Preview Component
-interface FormattedPaperPreviewProps {
-  paper: Paper;
-}
-
-function FormattedPaperPreview({ paper }: FormattedPaperPreviewProps) {
-  const isChinese = paper.request?.language === 'chinese';
-
-  if (!paper.sections) return null;
-
-  const sections = [
-    { key: 'abstract', title: isChinese ? '摘要' : 'Abstract', content: paper.sections.abstract },
-    { key: 'introduction', title: isChinese ? '1 引言' : '1. Introduction', content: paper.sections.introduction },
-    { key: 'literature_review', title: isChinese ? '2 文献综述' : '2. Literature Review', content: paper.sections.literature_review },
-    { key: 'methodology', title: isChinese ? '3 研究方法' : '3. Methodology', content: paper.sections.methodology },
-    { key: 'results', title: isChinese ? '4 研究结果' : '4. Results', content: paper.sections.results },
-    { key: 'discussion', title: isChinese ? '5 讨论' : '5. Discussion', content: paper.sections.discussion },
-    { key: 'conclusion', title: isChinese ? '6 结论' : '6. Conclusion', content: paper.sections.conclusion },
-    { key: 'references', title: isChinese ? '参考文献' : 'References', content: paper.sections.references },
-  ];
-
-  return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-600 p-8 md:p-12">
-      {/* Title */}
-      <div className="text-center mb-8 pb-8 border-b-2 border-gray-200 dark:border-gray-600">
-        <h1 className="text-2xl md:text-3xl font-bold text-gray-900 dark:text-gray-100 leading-tight">
-          {paper.sections.title}
-        </h1>
-        <div className="mt-4 flex flex-wrap items-center justify-center gap-4 text-sm text-gray-600 dark:text-gray-400">
-          {paper.request?.keywords && (
-            <span>
-              <strong>{isChinese ? '关键词：' : 'Keywords: '}</strong>
-              {paper.request.keywords.join(isChinese ? '；' : '; ')}
-            </span>
-          )}
-          {paper.request?.field && (
-            <span>
-              <strong>{isChinese ? '领域：' : 'Field: '}</strong>
-              {paper.request.field}
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Sections */}
-      <div className="space-y-6">
-        {sections.map((section) => (
-          section.content && (
-            <section key={section.key} id={section.key} className="paper-section">
-              {section.key === 'abstract' ? (
-                // Special formatting for abstract
-                <div className="bg-gray-50 dark:bg-gray-700 p-6 rounded-lg">
-                  <h2 className="text-center text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">
-                    {section.title}
-                  </h2>
-                  <p className="text-justify leading-relaxed text-gray-700 dark:text-gray-300 indent-8">
-                    {section.content}
-                  </p>
-                </div>
-              ) : section.key === 'references' ? (
-                // Special formatting for references
-                <div className="pt-4 border-t border-gray-200 dark:border-gray-600">
-                  <h2 className="text-center text-lg font-bold mb-4 text-gray-900 dark:text-gray-100">
-                    {section.title}
-                  </h2>
-                  <div className="text-sm text-gray-700 dark:text-gray-300 space-y-2">
-                    {section.content.split('\n\n').map((ref, idx) => (
-                      <p key={idx} className="pl-4 -indent-4">
-                        {ref}
-                      </p>
-                    ))}
-                  </div>
-                </div>
-              ) : (
-                // Standard section formatting
-                <div className="pt-2">
-                  <h2 className="text-lg font-bold mb-3 text-gray-900 dark:text-gray-100">
-                    {section.title}
-                  </h2>
-                  <div className="prose prose-gray dark:prose-invert max-w-none">
-                    {section.content.split('\n\n').map((paragraph, idx) => (
-                      <p key={idx} className="text-justify leading-relaxed text-gray-700 dark:text-gray-300 mb-4 indent-8 first:indent-0">
-                        {paragraph}
-                      </p>
-                    ))}
-                  </div>
-                </div>
+                </>
               )}
-            </section>
-          )
+            </>
+          )}
+        </div>
+      </div>
+
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300 flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 shrink-0" />{error}
+          <button className="ml-auto" onClick={() => setError('')}><X className="w-4 h-4" /></button>
+        </div>
+      )}
+
+      {running && (
+        <div className="card border-primary-200 dark:border-primary-800 bg-primary-50/60 dark:bg-primary-900/20">
+          <div className="flex items-center justify-between mb-2">
+            <p className="font-medium text-primary-800 dark:text-primary-200 flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" />{stageText}…
+            </p>
+            <span className="text-sm font-semibold text-primary-700 dark:text-primary-300">{paper.progress}%</span>
+          </div>
+          <div className="h-2 bg-white dark:bg-gray-700 rounded-full overflow-hidden">
+            <div className="h-full bg-primary-500 transition-all duration-500" style={{ width: `${paper.progress}%` }} />
+          </div>
+          <p className="text-xs text-primary-700/80 dark:text-primary-300/80 mt-2">
+            {zh
+              ? '生成过程会实时显示在「过程日志」中；每写完一节会自动保存草稿。'
+              : 'Live progress appears in the Log tab; each finished section is saved automatically.'}
+          </p>
+        </div>
+      )}
+
+      {paper.status === 'failed' && paper.error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/30 dark:text-red-300">
+          <p className="font-medium mb-1">{zh ? '生成失败' : 'Generation failed'}</p>
+          <p>{paper.error}</p>
+        </div>
+      )}
+
+      <div className="flex gap-1 border-b border-gray-200 dark:border-gray-700">
+        {([
+          ['preview', zh ? '正文' : 'Manuscript'],
+          ['sources', zh ? '参考文献' : 'References'],
+          ['log', zh ? '过程日志' : 'Log'],
+        ] as [Tab, string][]).map(([key, label]) => (
+          <button
+            key={key}
+            onClick={() => setTab(key)}
+            className={`px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-colors ${
+              tab === key
+                ? 'border-primary-600 text-primary-700 dark:text-primary-400 dark:border-primary-400'
+                : 'border-transparent text-gray-500 dark:text-gray-400 hover:text-gray-700'
+            }`}
+          >
+            {label}
+            {key === 'log' && events.length > 0 && <span className="ml-1.5 text-xs text-gray-400">{events.length}</span>}
+          </button>
         ))}
       </div>
 
-      {/* Footer */}
-      <div className="mt-12 pt-6 border-t border-gray-200 dark:border-gray-600 text-center text-sm text-gray-500 dark:text-gray-400">
-        <p>
-          {isChinese
-            ? `生成日期：${new Date(paper.created_at).toLocaleDateString('zh-CN')}`
-            : `Generated on: ${new Date(paper.created_at).toLocaleDateString('en-US')}`}
-        </p>
-      </div>
-    </div>
-  );
-}
+      {tab === 'preview' && (
+        <div className="space-y-4">
+          {sectionOrder.map((key) => {
+            const content = sections[key];
+            const isEditing = editing === key;
+            const label = SECTION_LABELS[key]?.[zh ? 'zh' : 'en'] || key;
+            const isBusy = busy === `regen-${key}` || busy === `save-${key}`;
+            return (
+              <section key={key} className="card">
+                <div className="flex items-center justify-between mb-3 gap-2">
+                  <h2 className="text-lg font-semibold text-gray-900 dark:text-gray-100">{label}</h2>
+                  {!running && (
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => { setEditing(isEditing ? null : key); setDraft(content || ''); }}
+                        className="text-sm text-gray-500 hover:text-primary-600 flex items-center gap-1"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" />{isEditing ? (zh ? '收起' : 'Close') : (zh ? '编辑' : 'Edit')}
+                      </button>
+                      <button
+                        onClick={() => setRegen({ key, instructions: '' })}
+                        disabled={isBusy}
+                        className="text-sm text-gray-500 hover:text-primary-600 flex items-center gap-1 disabled:opacity-50"
+                      >
+                        {busy === `regen-${key}` ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        {zh ? '重写' : 'Rewrite'}
+                      </button>
+                    </div>
+                  )}
+                </div>
 
-// Sources and References Tab Component
-interface SourcesAndReferencesTabProps {
-  paper: Paper;
-}
+                {isEditing ? (
+                  <div className="space-y-3">
+                    <textarea
+                      value={draft}
+                      onChange={(e) => setDraft(e.target.value)}
+                      className="input min-h-[220px] font-normal leading-relaxed"
+                    />
+                    <div className="flex justify-end gap-2">
+                      <button onClick={() => setEditing(null)} className="btn-secondary">{zh ? '取消' : 'Cancel'}</button>
+                      <button onClick={() => saveSection(key)} disabled={isBusy} className="btn-primary flex items-center gap-2">
+                        {isBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Save className="w-4 h-4" />}
+                        {zh ? '保存' : 'Save'}
+                      </button>
+                    </div>
+                  </div>
+                ) : content ? (
+                  <div className="markdown-content text-[15px]">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="text-sm text-gray-400 dark:text-gray-500 italic">
+                    {running ? (zh ? '正在生成…' : 'Generating…') : (zh ? '（本节暂无内容）' : '(empty)')}
+                  </p>
+                )}
 
-function SourcesAndReferencesTab({ paper }: SourcesAndReferencesTabProps) {
-  const isChinese = paper.request?.language === 'chinese';
+                {key === 'abstract' && (paper.request?.keywords?.length || 0) > 0 && (
+                  <p className="mt-3 text-sm text-gray-500 dark:text-gray-400">
+                    <span className="font-medium">{zh ? '关键词' : 'Keywords'}:</span> {paper.request.keywords?.join('; ')}
+                  </p>
+                )}
+              </section>
+            );
+          })}
 
-  // Parse references from paper sections
-  const parseReferences = (): Reference[] => {
-    if (!paper.sections?.references) return [];
-
-    const refs: Reference[] = [];
-    const lines = paper.sections.references.split('\n\n');
-
-    lines.forEach((line, index) => {
-      if (!line.trim()) return;
-
-      // Try to extract year (4 digits)
-      const yearMatch = line.match(/\((\d{4})\)/) || line.match(/(\d{4})/);
-      const year = yearMatch ? parseInt(yearMatch[1]) : new Date().getFullYear();
-
-      // Try to extract authors (text before year, or first part)
-      let authors: string[] = [];
-      const authorMatch = line.match(/^([^(]+)/);
-      if (authorMatch) {
-        const authorStr = authorMatch[1].trim();
-        // Split by & or and
-        authors = authorStr.split(/\s*&\s*|\s+and\s+/i).map(a => a.trim()).filter(Boolean);
-      }
-      if (authors.length === 0) {
-        authors = ['Unknown Author'];
-      }
-
-      // Extract title (between year and period, or just use remaining)
-      let title = line;
-      const titleMatch = line.match(/[."]([^."]+)[."]/);
-      if (titleMatch) {
-        title = titleMatch[1].trim();
-      }
-
-      refs.push({
-        id: `ref-${index}`,
-        title: title.substring(0, 100),
-        authors,
-        year,
-        source: line,
-      });
-    });
-
-    return refs;
-  };
-
-  const references = parseReferences();
-
-  // Get images from paper (if available) or create sample for demo
-  const images: PaperImage[] = paper.images || [];
-
-  return (
-    <div className="space-y-8">
-      {/* References Section */}
-      <div className="card">
-        <div className="flex items-center gap-3 mb-6">
-          <BookOpenCheck className="w-6 h-6 text-primary-600 dark:text-primary-400" />
-          <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
-            {isChinese ? '参考文献' : 'References'}
-          </h2>
-          <span className="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 rounded-full text-sm">
-            {references.length}
-          </span>
+          {paper.outline?.research_questions && paper.outline.research_questions.length > 0 && (
+            <section className="card bg-gray-50 dark:bg-gray-800/60">
+              <h2 className="text-sm font-semibold text-gray-700 dark:text-gray-300 mb-2 flex items-center gap-2">
+                <Sparkles className="w-4 h-4" />{zh ? '研究问题（由提纲阶段确定）' : 'Research questions (from outlining)'}
+              </h2>
+              <ul className="list-disc pl-5 text-sm text-gray-600 dark:text-gray-400 space-y-1">
+                {paper.outline.research_questions.map((q: string, i: number) => <li key={i}>{q}</li>)}
+              </ul>
+            </section>
+          )}
         </div>
+      )}
 
-        {references.length > 0 ? (
-          <div className="space-y-4">
-            {references.map((ref, index) => (
-              <div
-                key={ref.id}
-                className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg border-l-4 border-primary-500 hover:shadow-md transition-shadow"
-              >
-                <div className="flex items-start gap-3">
-                  <span className="flex-shrink-0 w-8 h-8 flex items-center justify-center bg-primary-100 dark:bg-primary-900/50 text-primary-700 dark:text-primary-300 rounded-full text-sm font-medium">
+      {tab === 'sources' && (
+        <div className="card">
+          {paper.references && paper.references.length > 0 ? (
+            <ol className="space-y-4">
+              {paper.references.map((ref, index) => (
+                <li key={index} className="flex gap-3">
+                  <span className="shrink-0 w-6 h-6 rounded-full bg-primary-50 dark:bg-primary-900/40 text-primary-700 dark:text-primary-300 text-xs font-semibold flex items-center justify-center">
                     {index + 1}
                   </span>
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-1">
-                      {ref.title}
-                    </h3>
-                    <div className="flex flex-wrap items-center gap-2 text-sm text-gray-600 dark:text-gray-400">
-                      <span className="flex items-center gap-1">
-                        <User className="w-3 h-3" />
-                        {ref.authors.join(', ')}
-                      </span>
-                      <span className="text-gray-400">|</span>
-                      <span>{ref.year}</span>
-                    </div>
-                    <p className="mt-2 text-xs text-gray-500 dark:text-gray-500 break-all">
-                      {ref.source}
+                  <div className="min-w-0">
+                    <p className="font-medium text-gray-900 dark:text-gray-100">{ref.title}</p>
+                    <p className="text-sm text-gray-500 dark:text-gray-400 mt-0.5">
+                      {(ref.authors || []).slice(0, 5).join(', ')}{ref.authors && ref.authors.length > 5 ? ' et al.' : ''}
+                      {ref.year ? ` · ${ref.year}` : ''}{ref.venue ? ` · ${ref.venue}` : ''}
                     </p>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-center py-8 text-gray-500 dark:text-gray-400">
-            <BookOpen className="w-12 h-12 mx-auto mb-3 opacity-50" />
-            <p>{isChinese ? '暂无参考文献信息' : 'No reference information available'}</p>
-          </div>
-        )}
-      </div>
-
-      {/* Images Section */}
-      <div className="card">
-        <div className="flex items-center gap-3 mb-6">
-          <ImageIcon className="w-6 h-6 text-primary-600 dark:text-primary-400" />
-          <h2 className="text-xl font-bold text-gray-900 dark:text-gray-100">
-            {isChinese ? '图片与图表来源' : 'Images & Charts Sources'}
-          </h2>
-          <span className="px-2 py-1 bg-primary-100 dark:bg-primary-900/30 text-primary-700 dark:text-primary-300 rounded-full text-sm">
-            {images.length}
-          </span>
-        </div>
-
-        {images.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            {images.map((img) => (
-              <div
-                key={img.id}
-                className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg hover:shadow-md transition-shadow"
-              >
-                <div className="flex items-start gap-3">
-                  <div className="flex-shrink-0">
-                    {img.source === 'ai_generated' ? (
-                      <Sparkles className="w-8 h-8 text-purple-500" />
-                    ) : img.source === 'chart' ? (
-                      <BarChart3 className="w-8 h-8 text-blue-500" />
-                    ) : img.source === 'web_search' ? (
-                      <Globe className="w-8 h-8 text-green-500" />
-                    ) : (
-                      <FileText className="w-8 h-8 text-orange-500" />
-                    )}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-1">
-                      {img.caption || (isChinese ? '图片' : 'Image')}
-                    </h3>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <SourceBadge source={img.source} isChinese={isChinese} />
-                      {img.width && img.height && (
-                        <span className="text-xs text-gray-500 dark:text-gray-400">
-                          {img.width} x {img.height}px
-                        </span>
+                    <div className="flex items-center gap-3 mt-1 text-xs">
+                      {ref.source && <span className="px-2 py-0.5 rounded bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300">{ref.source}</span>}
+                      {typeof ref.citations === 'number' && <span className="text-gray-400">↗ {ref.citations}</span>}
+                      {(ref.doi || ref.url) && (
+                        <a href={ref.doi ? `https://doi.org/${ref.doi}` : ref.url} target="_blank" rel="noreferrer" className="text-primary-600 dark:text-primary-400 inline-flex items-center gap-1">
+                          <ExternalLink className="w-3 h-3" />{zh ? '原文' : 'Open'}
+                        </a>
                       )}
                     </div>
-                    {img.source_url && (
-                      <a
-                        href={img.source_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="mt-2 inline-flex items-center gap-1 text-sm text-primary-600 dark:text-primary-400 hover:underline"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        {isChinese ? '查看来源' : 'View Source'}
-                      </a>
-                    )}
-                    {img.source_title && (
-                      <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">
-                        {isChinese ? '来源: ' : 'Source: '}{img.source_title}
-                      </p>
-                    )}
                   </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="space-y-4">
-            {/* Sample image sources for demo */}
-            <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg border-l-4 border-purple-500">
-              <div className="flex items-start gap-3">
-                <Sparkles className="w-8 h-8 text-purple-500" />
-                <div>
-                  <h3 className="font-medium text-gray-900 dark:text-gray-100">
-                    {isChinese ? '图表 1: 研究流程图' : 'Figure 1: Research Flowchart'}
-                  </h3>
-                  <SourceBadge source="ai_generated" isChinese={isChinese} />
-                  <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-                    {isChinese
-                      ? '使用 AI 生成的 Mermaid 流程图，展示研究方法的整体流程'
-                      : 'AI-generated Mermaid flowchart showing the research methodology workflow'}
-                  </p>
-                </div>
-              </div>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <div className="text-center text-gray-500 dark:text-gray-400 py-8">
+              <BookOpen className="w-10 h-10 mx-auto mb-3 text-gray-300 dark:text-gray-600" />
+              {zh ? '本篇没有检索到外部文献，正文未做引用标注。' : 'No external references were retrieved for this paper.'}
             </div>
+          )}
+        </div>
+      )}
 
-            <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg border-l-4 border-blue-500">
-              <div className="flex items-start gap-3">
-                <BarChart3 className="w-8 h-8 text-blue-500" />
-                <div>
-                  <h3 className="font-medium text-gray-900 dark:text-gray-100">
-                    {isChinese ? '图表 2: 实验结果对比' : 'Figure 2: Experimental Results Comparison'}
-                  </h3>
-                  <SourceBadge source="chart" isChinese={isChinese} />
-                  <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-                    {isChinese
-                      ? '使用 Matplotlib 生成的数据可视化图表，基于论文中的实验数据'
-                      : 'Data visualization chart generated using Matplotlib based on experimental data in the paper'}
-                  </p>
-                </div>
-              </div>
-            </div>
+      {tab === 'log' && (
+        <div className="card">
+          {events.length === 0 ? (
+            <p className="text-center text-gray-500 dark:text-gray-400 py-8">
+              {running ? (zh ? '等待第一条日志…' : 'Waiting for the first event…') : (zh ? '本次会话暂无日志。' : 'No log in this session.')}
+            </p>
+          ) : (
+            <ul className="space-y-2 font-mono text-xs">
+              {events.map((event) => (
+                <li key={`${event.id}-${event.ts}`} className="flex gap-3">
+                  <span className="text-gray-400 shrink-0">{new Date(event.ts).toLocaleTimeString()}</span>
+                  <span className={`shrink-0 uppercase ${event.level === 'error' ? 'text-red-500' : event.level === 'warning' ? 'text-amber-500' : 'text-primary-500'}`}>
+                    {event.stage}
+                  </span>
+                  <span className={event.level === 'error' ? 'text-red-600 dark:text-red-400' : 'text-gray-700 dark:text-gray-300'}>{event.message}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
-            <div className="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg border-l-4 border-green-500">
-              <div className="flex items-start gap-3">
-                <Globe className="w-8 h-8 text-green-500" />
-                <div>
-                  <h3 className="font-medium text-gray-900 dark:text-gray-100">
-                    {isChinese ? '图片 3: 概念示意图' : 'Figure 3: Conceptual Diagram'}
-                  </h3>
-                  <SourceBadge source="web_search" isChinese={isChinese} />
-                  <p className="mt-1 text-sm text-gray-600 dark:text-gray-400">
-                    {isChinese
-                      ? '通过 DuckDuckGo/Unsplash 搜索获取的相关学术图片'
-                      : 'Academic image sourced via DuckDuckGo/Unsplash search'}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            <div className="text-center py-4 text-xs text-gray-500 dark:text-gray-500">
-              {isChinese
-                ? '注：以上仅为示例。实际论文中的图片来源将在生成后显示在此'
-                : 'Note: Above are examples only. Actual image sources will appear here after paper generation'}
+      {regen && (
+        <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50" onClick={() => setRegen(null)}>
+          <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl max-w-lg w-full p-6" onClick={(e) => e.stopPropagation()}>
+            <h3 className="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">
+              {zh ? '重写本节' : 'Rewrite section'} · {SECTION_LABELS[regen.key]?.[zh ? 'zh' : 'en'] || regen.key}
+            </h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              {zh ? '可以补充写作要求；模型会参考其他章节保持前后一致。' : 'Add optional guidance; the model keeps consistency with the other sections.'}
+            </p>
+            <textarea
+              className="input min-h-[100px]"
+              value={regen.instructions}
+              onChange={(e) => setRegen({ ...regen, instructions: e.target.value })}
+              placeholder={zh ? '例如：更突出方法局限，减少描述性内容' : 'e.g. emphasise limitations, less descriptive'}
+            />
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setRegen(null)} className="btn-secondary">{zh ? '取消' : 'Cancel'}</button>
+              <button onClick={regenerate} disabled={busy === `regen-${regen.key}`} className="btn-primary flex items-center gap-2">
+                {busy === `regen-${regen.key}` ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                {zh ? '开始重写' : 'Rewrite'}
+              </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
     </div>
-  );
-}
-
-// Source Badge Component
-function SourceBadge({ source, isChinese }: { source: string; isChinese: boolean }) {
-  const configs: Record<string, { label: string; className: string }> = {
-    ai_generated: {
-      label: isChinese ? 'AI 生成' : 'AI Generated',
-      className: 'bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300',
-    },
-    web_search: {
-      label: isChinese ? '网络搜索' : 'Web Search',
-      className: 'bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300',
-    },
-    pdf_extract: {
-      label: isChinese ? 'PDF 提取' : 'PDF Extract',
-      className: 'bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300',
-    },
-    chart: {
-      label: isChinese ? '数据图表' : 'Data Chart',
-      className: 'bg-blue-100 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300',
-    },
-  };
-
-  const config = configs[source] || configs.web_search;
-
-  return (
-    <span className={`px-2 py-0.5 rounded text-xs font-medium ${config.className}`}>
-      {config.label}
-    </span>
   );
 }
