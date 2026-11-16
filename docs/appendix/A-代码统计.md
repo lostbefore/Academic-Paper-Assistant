@@ -6,19 +6,19 @@
 
 | 模块 | 行数 |
 |---|---:|
+| docs | 8755 |
 | legacy（v1 归档） | 8309 |
 | backend | 3728 |
 | frontend | 3017 |
-| 根目录 | 713 |
-| docs | 599 |
+| 根目录 | 734 |
 | deploy | 74 |
-| **合计** | **16440** |
+| **合计** | **24617** |
 
 ## A.2 文件明细
 
 | 文件 | 类型 | 字节 | 行数 |
 |---|---|---:|---:|
-| `README.md` | Markdown | 10009 | 210 |
+| `README.md` | Markdown | 11703 | 231 |
 | `backend/.pytest_cache/README.md` | Markdown | 302 | 8 |
 | `backend/api.py` | Python | 198 | 7 |
 | `backend/app/__init__.py` | Python | 0 | 0 |
@@ -49,13 +49,27 @@
 | `backend/tests/test_security.py` | Python | 1649 | 59 |
 | `deploy/apa.service` | systemd | 610 | 21 |
 | `deploy/install.sh` | Shell | 1616 | 53 |
-| `docs/01-需求分析与项目概述.md` | Markdown | 8085 | 145 |
-| `docs/README.md` | Markdown | 4045 | 57 |
-| `docs/appendix/A-代码统计.md` | Markdown | 5987 | 115 |
+| `docs/01-需求分析与项目概述.md` | Markdown | 8258 | 146 |
+| `docs/02-系统架构设计.md` | Markdown | 13608 | 195 |
+| `docs/03-数据库设计.md` | Markdown | 8207 | 208 |
+| `docs/04-接口设计.md` | Markdown | 7589 | 221 |
+| `docs/05-生成流水线设计.md` | Markdown | 7805 | 175 |
+| `docs/06-关键模块设计.md` | Markdown | 8821 | 213 |
+| `docs/07-前端设计.md` | Markdown | 5708 | 128 |
+| `docs/08-测试方案与测试记录.md` | Markdown | 10867 | 228 |
+| `docs/09-部署与运维.md` | Markdown | 9127 | 267 |
+| `docs/10-版本演进与变更记录.md` | Markdown | 7404 | 155 |
+| `docs/11-学术诚信与使用边界.md` | Markdown | 4898 | 96 |
+| `docs/12-开发过程记录.md` | Markdown | 14828 | 250 |
+| `docs/README.md` | Markdown | 4602 | 62 |
+| `docs/appendix/A-代码统计.md` | Markdown | 5930 | 114 |
 | `docs/appendix/B-接口清单.md` | Markdown | 1271 | 28 |
 | `docs/appendix/C-数据库结构.md` | Markdown | 2146 | 90 |
 | `docs/appendix/D-提交历史.md` | Markdown | 715 | 12 |
-| `docs/build_appendix.py` | Python | 5586 | 152 |
+| `docs/build_appendix.py` | Python | 8276 | 207 |
+| `docs/build_bundle.py` | Python | 5761 | 135 |
+| `docs/build_submission_pdf.py` | Python | 7260 | 201 |
+| `docs/docs-bundle.html` | HTML | 169539 | 5624 |
 | `frontend/index.html` | HTML | 386 | 13 |
 | `frontend/package.json` | JSON | 1041 | 36 |
 | `frontend/src/App.tsx` | TypeScript (React) | 5978 | 143 |

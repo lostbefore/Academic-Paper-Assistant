@@ -16,7 +16,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
 os.environ.setdefault("DATA_DIR", str(ROOT / "data"))
 
-OUT = ROOT / "docs" / "appendix"
+DOCS_ROOT = ROOT / "docs"
+OUT = DOCS_ROOT / "appendix"
 OUT.mkdir(parents=True, exist_ok=True)
 
 SKIP_DIRS = {".git", "node_modules", "__pycache__", "dist", ".venv", "data", "shots"}
@@ -145,8 +146,62 @@ def git_log() -> None:
     print("wrote", OUT / "D-提交历史.md")
 
 
+def doc_inventory() -> None:
+    """List every documentation file with size, hash and mtime.
+
+    This is the literal "file record" of the documentation set: it lets a
+    reviewer verify that the compiled PDF was produced from exactly these
+    files.
+    """
+    import hashlib
+    from datetime import datetime
+
+    rows = []
+    for path in sorted(DOCS_ROOT.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.suffix not in {".md", ".py", ".txt", ".png", ".jpg"}:
+            continue
+        if path.name in {"docs-bundle.html"}:
+            continue
+        rel = path.relative_to(DOCS_ROOT).as_posix()
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+        mtime = datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        if path.suffix in {".md", ".py", ".txt"}:
+            lines = len(path.read_text(encoding="utf-8", errors="ignore").splitlines())
+        else:
+            lines = 0
+        rows.append((rel, path.suffix.lstrip(".").upper(), lines, path.stat().st_size, digest, mtime))
+
+    total_bytes = sum(r[3] for r in rows)
+    text_files = [r for r in rows if r[1] in {"MD", "PY", "TXT"}]
+    images = [r for r in rows if r[1] in {"PNG", "JPG"}]
+
+    with (OUT / "F-文档清单.md").open("w", encoding="utf-8") as fh:
+        fh.write("# 附录 F · 文档文件清单\n\n")
+        fh.write(
+            "> 本清单由脚本扫描 `docs/` 目录自动生成，记录每个文档文件的类型、行数、字节数、"
+            "SHA-256 前 16 位与最后修改时间，用于核对本 PDF 的汇编来源。\n\n"
+        )
+        fh.write(
+            f"合计 {len(rows)} 个文件（文档 {len(text_files)} 个、图片 {len(images)} 个），"
+            f"共 {total_bytes / 1024:.1f} KB。\n\n"
+        )
+        fh.write("| 文件 | 类型 | 行数 | 字节 | SHA-256 | 修改时间 |\n")
+        fh.write("|---|---|---:|---:|---|---|\n")
+        for rel, kind, lines, size, digest, mtime in rows:
+            line_cell = str(lines) if lines else "—"
+            fh.write(f"| `{rel}` | {kind} | {line_cell} | {size} | `{digest}` | {mtime} |\n")
+        fh.write(
+            "\n> 说明：编译生成的 PDF 与 HTML 不列入本表（避免自引用）；"
+            "表中哈希值取 SHA-256 前 16 位，足以判断文件是否被改动。\n"
+        )
+    print("wrote", OUT / "F-文档清单.md", "files:", len(rows))
+
+
 if __name__ == "__main__":
     code_stats()
     api_list()
     schema_dump()
     git_log()
+    doc_inventory()
