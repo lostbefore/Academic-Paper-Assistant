@@ -35,6 +35,7 @@ ORDER = [
     ("appendix/C-数据库结构.md", "附录 C 数据库结构"),
     ("appendix/D-提交历史.md", "附录 D 提交历史"),
     ("appendix/F-文档清单.md", "附录 F 文档清单"),
+    ("appendix/G-整理与部署记录.md", "附录 G 整理与部署记录"),
 ]
 
 CSS = """

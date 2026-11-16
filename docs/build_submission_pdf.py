@@ -50,13 +50,14 @@ SECTIONS = [
     ("附录 D", "版本库提交历史"),
     ("附录 E", "测试执行日志"),
     ("附录 F", "文档文件清单"),
+    ("附录 G", "2026-11-16 整理与部署记录"),
 ]
 
 
 def collect_sections() -> list[tuple[str, str]]:
     rendered: list[tuple[str, str]] = []
     for rel, _title in ORDER:
-        if rel == "appendix/F-文档清单.md":
+        if rel in {"appendix/F-文档清单.md", "appendix/G-整理与部署记录.md"}:
             continue  # appended after the test log so the appendix order stays A..F
         path = DOCS / rel
         if path.exists():
@@ -77,6 +78,10 @@ def collect_sections() -> list[tuple[str, str]]:
     inventory = DOCS / "appendix" / "F-文档清单.md"
     if inventory.exists():
         rendered.append(("appendix/F", render(inventory.read_text(encoding="utf-8"))))
+
+    deploy = DOCS / "appendix" / "G-整理与部署记录.md"
+    if deploy.exists():
+        rendered.append(("appendix/G", render(deploy.read_text(encoding="utf-8"))))
     return rendered
 
 
