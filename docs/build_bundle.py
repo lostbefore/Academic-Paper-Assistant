@@ -112,7 +112,8 @@ def main() -> None:
   <div class="meta">
     文档版本：V2.0<br>
     对应系统版本：v2.0.0<br>
-    编制日期：2026 年 11 月 16 日
+    设计定稿：2026 年 6 月<br>
+    文档校订：2026 年 11 月
   </div>
   <div class="foot">本文件由仓库内 Markdown 文档自动汇编生成，内容与 docs/ 目录一致</div>
 </div>
